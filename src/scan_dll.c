@@ -27,6 +27,12 @@ static __int64 s_vtableA;      /* monster/NPC outer VT */
 static __int64 s_vtableB;      /* player outer VT */
 static __int64 s_monsterVT;
 
+/* candidate addresses found during scan */
+#define MAX_CAND 32
+static __int64 candAddrs[MAX_CAND];
+static int candHP[MAX_CAND];
+static int candCount = 0;
+
 /* entity slot cache - addresses where entities have EVER been found */
 static __int64 slots[MAX_SLOTS];
 static int slotCount = 0;
@@ -246,6 +252,7 @@ __declspec(dllexport) int __cdecl scan_init(int maxHP, int maxMP) {
     /* Phase 1: find player without vtable (HP/MP/coord/direction heuristic) */
     int autoMode = (maxHP == 0);
     __int64 bestAddr = 0; int bestHP = 0;  /* autoMode: pick highest mHP candidate */
+    candCount = 0;
     int matchCount = 0, regionCount = 0, readOk = 0;
     MBI mbi;
     __int64 a = 0x10000;
@@ -282,6 +289,12 @@ __declspec(dllexport) int __cdecl scan_init(int maxHP, int maxMP) {
                             matchCount++;
                             bestHP = mHP;
                             bestAddr = (__int64)mbi.BA + i;
+                        }
+                        /* Store all candidates */
+                        if (candCount < MAX_CAND) {
+                            candAddrs[candCount] = (__int64)mbi.BA + i;
+                            candHP[candCount] = mHP;
+                            candCount++;
                         }
                         continue;  /* don't take first match, keep scanning */
                     } else {
@@ -381,6 +394,19 @@ __declspec(dllexport) int __cdecl scan_rescan(void) {
 }
 
 __declspec(dllexport) __int64 __cdecl scan_get_player_addr(void) { return s_playerAddr; }
+__declspec(dllexport) DWORD __cdecl scan_get_pid(void) { return s_pid; }
+
+/* Candidate enumeration */
+__declspec(dllexport) int __cdecl scan_get_cand_count(void) { return candCount; }
+__declspec(dllexport) __int64 __cdecl scan_get_cand_addr(int idx) {
+    return (idx >= 0 && idx < candCount) ? candAddrs[idx] : 0;
+}
+__declspec(dllexport) int __cdecl scan_get_cand_hp(int idx) {
+    return (idx >= 0 && idx < candCount) ? candHP[idx] : 0;
+}
+__declspec(dllexport) void __cdecl scan_set_player_addr(__int64 addr) {
+    s_playerAddr = addr;
+}
 __declspec(dllexport) __int64 __cdecl scan_get_vtable(void) { return s_vtableA; }
 __declspec(dllexport) int __cdecl scan_get_slot_count(void) { return slotCount; }
 __declspec(dllexport) int __cdecl scan_get_new_slots(void) { int n = bgNewSlots; bgNewSlots = 0; return n; }

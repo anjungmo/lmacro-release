@@ -10,14 +10,13 @@
 - 좌클릭 / 우클릭 / 더블클릭
 """
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, filedialog
 import ctypes, ctypes.wintypes as wt
 import psutil, threading, time, random, os, sys, queue
 
-if not ctypes.windll.shell32.IsUserAnAdmin():
-    import subprocess
-    subprocess.Popen([sys.executable], creationflags=0x00004000)
-    sys.exit()
+# stdout 버퍼링 해제
+sys.stdout.reconfigure(line_buffering=True)
+sys.stderr.reconfigure(line_buffering=True)
 
 if getattr(sys, 'frozen', False):
     BASE = os.path.dirname(sys.executable)
@@ -55,6 +54,14 @@ if _init_result > 0:
     x, y = ctypes.c_int(), ctypes.c_int()
     rr = _scan.scan_read_player(ctypes.byref(x), ctypes.byref(y))
     print(f"[DEBUG] read_player result={rr} x={x.value} y={y.value}")
+
+# PathFinder (A*)
+try:
+    from core import astar_path
+    print("[OK] astar_path 모듈 로드")
+except Exception as _e:
+    print(f"[WARN] astar_path 로드 실패: {_e}")
+    astar_path = None
 
 def do_rescan(max_hp, max_mp=0):
     """Re-scan with exact maxHP for precise matching"""
@@ -149,7 +156,8 @@ def find_hwnd(pid):
 
 def read_pos():
     x,y=ctypes.c_int(),ctypes.c_int()
-    if _scan.scan_read_player(ctypes.byref(x),ctypes.byref(y)):
+    r = _scan.scan_read_player(ctypes.byref(x),ctypes.byref(y))
+    if r:
         return x.value, y.value
     return None, None
 
@@ -160,16 +168,18 @@ def tile2scr(hwnd, px,py, tx,ty):
     a=24.0*cw/800; b=12.0*ch/600
     cx=pt.x+cw//2; cy=pt.y+ch//2-int(ch*90/900)
     dx,dy=tx-px,ty-py
-    return cx+int(a*(dx+dy)), cy+int(b*(dy-dx))
+    sx,sy = cx+int(a*(dx+dy)), cy+int(b*(dy-dx))
+    print(f"[TILE] cw={cw} ch={ch} pt=({pt.x},{pt.y}) center=({cx},{cy}) dx={dx} dy={dy} → scr({sx},{sy})", flush=True)
+    return sx, sy
 
 def _fg(hwnd):
     user32.SetForegroundWindow(hwnd)
     time.sleep(0.03)
 
 def _mv(x, y):
+    """마우스 이동 — SetCursorPos로 화면 좌표 이동 후 드라이버로 클릭"""
     user32.SetCursorPos(x, y)
-    time.sleep(0.02)
-
+    time.sleep(0.03)
 
 # ═══════════════════════════════════════════
 #  색상 (Catppuccin Mocha)
@@ -189,6 +199,7 @@ class ClientTab:
         self.slot = slot
         self.cid = f"c{slot}"
         self.running = False
+        self.pf = None  # PathFinder 인스턴스 (지연 초기화)
         self.frame = tk.Frame(nb, bg=BG)
         nb.add(self.frame, text=f" 클라{slot} (PID {pid}) ")
         self._build()
@@ -230,6 +241,8 @@ class ClientTab:
         self.wp_entry = self._ent(wr, 12); self.wp_entry.pack(side='left', padx=4)
         self._btn(wr, "추가", self._add_wp).pack(side='left', padx=2)
         self._btn(wr, "📍 현재위치", self._add_cur, ACCENT).pack(side='left', padx=2)
+        self._btn(wr, "💾 저장", self._save, BLUE).pack(side='right', padx=2)
+        self._btn(wr, "📂 불러오기", self._load, BLUE).pack(side='right', padx=2)
 
         # ── 대사 리스트 ──
         cf = tk.LabelFrame(f, text=" 대사 리스트 ", bg=BG2, fg=ACCENT,
@@ -250,6 +263,9 @@ class ClientTab:
         self._btn(cr, "삭제", self._del_chat, RED).pack(side='left', padx=2)
         self._btn(cr, "▲", self._chat_up, BLUE).pack(side='left', padx=1)
         self._btn(cr, "▼", self._chat_dn, BLUE).pack(side='left', padx=1)
+        self._lbl(cr, " 타이밍:").pack(side='left', padx=(8,0))
+        self.chat_delay = self._ent(cr, 4); self.chat_delay.insert(0, "3"); self.chat_delay.pack(side='left', padx=2)
+        self._lbl(cr, "초").pack(side='left')
 
         # ── 명령 추가 ──
         cmd = tk.LabelFrame(f, text=" 명령 추가 ", bg=BG2, fg=ACCENT,
@@ -277,11 +293,18 @@ class ClientTab:
         tk.Radiobutton(r1, text="1회", variable=self.loop_var, value="1회",
                        bg=BG2, fg=FG, selectcolor=BG3, activebackground=BG2,
                        font=("맑은 고딕",9)).pack(side='left')
-        self._lbl(r1, "  딜레이:").pack(side='left')
+        self._lbl(r1, "  목적지후:").pack(side='left')
         self.d_min = self._ent(r1, 3); self.d_min.insert(0, "1"); self.d_min.pack(side='left', padx=2)
         tk.Label(r1, text="~", bg=BG2, fg=FG2, font=("Consolas",10)).pack(side='left')
         self.d_max = self._ent(r1, 3); self.d_max.insert(0, "3"); self.d_max.pack(side='left', padx=2)
         self._lbl(r1, "초").pack(side='left')
+
+        r1b = tk.Frame(ctrl, bg=BG2); r1b.pack(fill='x', padx=4, pady=2)
+        self._lbl(r1b, "대사 간격:").pack(side='left')
+        self.c_min = self._ent(r1b, 3); self.c_min.insert(0, "3"); self.c_min.pack(side='left', padx=2)
+        tk.Label(r1b, text="~", bg=BG2, fg=FG2, font=("Consolas",10)).pack(side='left')
+        self.c_max = self._ent(r1b, 3); self.c_max.insert(0, "5"); self.c_max.pack(side='left', padx=2)
+        self._lbl(r1b, "초").pack(side='left')
 
         r2 = tk.Frame(ctrl, bg=BG2); r2.pack(fill='x', padx=4, pady=4)
         self._btn(r2, "▶ 시작", self._start, GREEN).pack(side='left', padx=4)
@@ -293,21 +316,66 @@ class ClientTab:
     # ── 스케줄러 래핑 입력 ──
     def _do_click(self, sx, sy, mode="좌클릭"):
         """스케줄러 큐에 클릭 요청"""
+        sw = user32.GetSystemMetrics(0)  # SM_CXSCREEN
+        sh = user32.GetSystemMetrics(1)  # SM_CYSCREEN
+        # 화면 밖이면 가장자리로 클램핑
+        clamped = False
+        if sx < 0: sx = 0; clamped = True
+        if sy < 0: sy = 0; clamped = True
+        if sx >= sw: sx = sw - 1; clamped = True
+        if sy >= sh: sy = sh - 1; clamped = True
+        if clamped:
+            print(f"[CLAMP] 화면 밖 → ({sx},{sy}) screen={sw}x{sh})", flush=True)
         def action():
-            _fg(self.hwnd)
+            print(f"[CLICK] ({sx},{sy}) {mode}")
             _mv(sx, sy)
+            time.sleep(0.05)
+            # 검증: 이동 후 실제 커서 위치
+            ax, ay = ctypes.c_long(), ctypes.c_long()
+            user32.GetCursorPos(ctypes.byref(ax), ctypes.byref(ay))
+            print(f"[POS] 이동후 커서=({ax.value},{ay.value}) 목표=({sx},{sy})", flush=True)
             if mode == "좌클릭":     hw.click()
             elif mode == "우클릭":   hw.right_click()
             elif mode == "더블클릭": hw.double_click()
         sched.submit(self.cid, action)
 
     def _do_type(self, text):
-        """스케줄러 큐에 타이핑 요청"""
+        """스케줄러 큐에 타이핑 요청 — 드라이버 키보드"""
         def action():
-            _fg(self.hwnd)
-            hw.type_text(text)
-            time.sleep(0.05)
-            hw.key(0x0D)  # Enter
+            print(f"[TYPE] 시작: '{text}'")
+            # 채팅창 열기 (Enter)
+            hw.key(0x0D)
+            time.sleep(0.3)
+            has_korean = any(ord(ch) >= 0x80 for ch in text)
+            if has_korean:
+                # 클립보드에 텍스트 복사
+                data = text.encode('utf-16-le') + b'\x00\x00'
+                user32.OpenClipboard(0)
+                user32.EmptyClipboard()
+                kernel32.GlobalAlloc.restype = ctypes.c_void_p
+                kernel32.GlobalLock.restype = ctypes.c_void_p
+                h = kernel32.GlobalAlloc(0x0002, len(data))
+                p = kernel32.GlobalLock(h)
+                ctypes.memmove(p, data, len(data))
+                kernel32.GlobalUnlock(h)
+                user32.SetClipboardData(13, h)  # CF_UNICODETEXT
+                user32.CloseClipboard()
+                time.sleep(0.05)
+                # Ctrl+V — 드라이버 경로 (SendInput은 게임에서 무시됨)
+                hw._drv_kbd(0x1D, up=False)  # Ctrl down (scancode)
+                time.sleep(0.05)
+                hw._drv_kbd(0x2F, up=False)  # V down (scancode)
+                time.sleep(0.05)
+                hw._drv_kbd(0x2F, up=True)   # V up
+                time.sleep(0.03)
+                hw._drv_kbd(0x1D, up=True)   # Ctrl up
+                print(f"[CHAT] 클립보드+드라이버 Ctrl+V: {text}")
+            else:
+                hw.type_text(text)
+                print(f"[CHAT] 드라이버 타이핑: {text}")
+            time.sleep(0.1)
+            hw.key(0x0D)  # Enter - 전송
+            print(f"[TYPE] 전송완료")
         sched.submit(self.cid, action)
 
     # ── UI 액션 ──
@@ -320,7 +388,28 @@ class ClientTab:
         if t: self.wp_text.insert(tk.END, t+"\n"); self.wp_entry.delete(0, tk.END)
 
     def _add_cur(self):
+        do_rescan(0, 0)
+        time.sleep(0.3)
         x, y = read_pos()
+        paddr = 0
+        try: paddr = _scan.scan_get_player_addr()
+        except: pass
+        # 후보 전체 덤프
+        try:
+            _scan.scan_get_cand_count.restype = ctypes.c_int
+            _scan.scan_get_cand_addr.restype = ctypes.c_int64
+            _scan.scan_get_cand_addr.argtypes = [ctypes.c_int]
+            _scan.scan_get_cand_hp.restype = ctypes.c_int
+            _scan.scan_get_cand_hp.argtypes = [ctypes.c_int]
+            ncand = _scan.scan_get_cand_count()
+            print(f"[CAND] {ncand} candidates (current playerAddr=0x{paddr:X}):", flush=True)
+            pid = _scan.scan_get_pid()
+            for i in range(ncand):
+                addr = _scan.scan_get_cand_addr(i)
+                mhp = _scan.scan_get_cand_hp(i)
+                print(f"  [{i}] addr=0x{addr:X} mHP={mhp}", flush=True)
+        except Exception as e:
+            print(f"[CAND] err: {e}", flush=True)
         if x is not None:
             self.wp_text.insert(tk.END, f"{x},{y}\n")
             self.pos_var.set(f"좌표: ({x},{y})")
@@ -345,6 +434,40 @@ class ClientTab:
         i=s[0]; v=self.chat_lb.get(i)
         self.chat_lb.delete(i); self.chat_lb.insert(i+1,v); self.chat_lb.select_set(i+1)
 
+    def _save(self):
+        import json
+        data = {
+            "waypoints": self.wp_text.get("1.0", tk.END).strip(),
+            "chats": [self.chat_lb.get(i) for i in range(self.chat_lb.size())],
+            "delay_wp": [self.d_min.get(), self.d_max.get()],
+            "delay_chat": [self.c_min.get(), self.c_max.get()],
+        }
+        path = filedialog.asksaveasfilename(defaultextension=".json",
+                    filetypes=[("JSON","*.json")], title="프리셋 저장")
+        if path:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+
+    def _load(self):
+        import json
+        path = filedialog.askopenfilename(filetypes=[("JSON","*.json")], title="프리셋 불러오기")
+        if not path: return
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if "waypoints" in data:
+            self.wp_text.delete("1.0", tk.END)
+            self.wp_text.insert("1.0", data["waypoints"])
+        if "chats" in data:
+            self.chat_lb.delete(0, tk.END)
+            for c in data["chats"]:
+                self.chat_lb.insert(tk.END, c)
+        if "delay_wp" in data:
+            self.d_min.delete(0, tk.END); self.d_min.insert(0, data["delay_wp"][0])
+            self.d_max.delete(0, tk.END); self.d_max.insert(0, data["delay_wp"][1])
+        if "delay_chat" in data:
+            self.c_min.delete(0, tk.END); self.c_min.insert(0, data["delay_chat"][0])
+            self.c_max.delete(0, tk.END); self.c_max.insert(0, data["delay_chat"][1])
+
     def _add_cmd(self):
         t = self.cmd_type.get()
         x = self.cmd_x.get().strip(); y = self.cmd_y.get().strip()
@@ -355,6 +478,7 @@ class ClientTab:
     def _start(self):
         if self.running: return
         self.running = True; self.status_var.set("실행중")
+        print(f"[START] 스레드 시작 hwnd={self.hwnd}", flush=True)
         threading.Thread(target=self._run, daemon=True).start()
 
     def _stop(self):
@@ -367,47 +491,127 @@ class ClientTab:
         return True
 
     def _run(self):
-        inf = self.loop_var.get() == "무제한"
-        dmin = float(self.d_min.get() or 1)
-        dmax = float(self.d_max.get() or 3)
+        print("[RUN] 진입", flush=True)
+        try:
+            # PathFinder 지연 초기화
+            if astar_path and self.pf is None:
+                try:
+                    self.pf = astar_path.PathFinder(target_pid=self.pid)
+                    print(f"[OK] PathFinder 초기화 완료 pid={self.pid}", flush=True)
+                except Exception as e:
+                    print(f"[WARN] PathFinder 초기화 실패: {e}, 직선이동 fallback", flush=True)
+                    self.pf = None
 
-        while self.running:
-            # 1) 웨이포인트 이동
-            wp = self.wp_text.get("1.0", tk.END).strip()
-            if wp:
-                for line in wp.split("\n"):
+            inf = self.loop_var.get() == "무제한"
+            dmin = float(self.d_min.get() or 1)
+            dmax = float(self.d_max.get() or 3)
+            cmin = float(self.c_min.get() or 3)
+            cmax = float(self.c_max.get() or 5)
+
+            while self.running:
+                # 1) 웨이포인트 이동 (A*)
+                wp = self.wp_text.get("1.0", tk.END).strip()
+                print(f"[RUN] wp={repr(wp[:100])} hwnd={self.hwnd}", flush=True)
+                if wp:
+                    for line in wp.split("\n"):
+                        if not self.running: break
+                        line = line.strip()
+                        if not line: continue
+                        parts = line.split("#")
+                        coord = parts[0].replace(" ","").split(",")
+                        mode = parts[1].strip() if len(parts) > 1 else "좌클릭"
+                        if len(coord) < 2: continue
+                        try: tx, ty = int(coord[0]), int(coord[1])
+                        except: continue
+
+                        # 목적지까지 이동
+                        if self.pf:
+                            self._run_astar_walk(tx, ty, mode)
+                        else:
+                            # fallback: 기존 직선 스텝 이동
+                            self._run_direct_walk(tx, ty, mode)
+
+                        # 목적지 도착 후 딜레이
+                        if self.running:
+                            self._sleep(random.uniform(dmin, dmax))
+
+                # 2) 대사 전송
+                for i in range(self.chat_lb.size()):
                     if not self.running: break
-                    line = line.strip()
-                    if not line: continue
-                    parts = line.split("#")
-                    coord = parts[0].replace(" ","").split(",")
-                    mode = parts[1].strip() if len(parts) > 1 else "좌클릭"
-                    if len(coord) < 2: continue
-                    try: tx, ty = int(coord[0]), int(coord[1])
-                    except: continue
+                    msg = self.chat_lb.get(i)
+                    self._do_type(msg)
+                    if not self._sleep(random.uniform(cmin, cmax)): break
 
-                    px, py = read_pos()
-                    if px is None: time.sleep(1); continue
+                if not inf: break
 
-                    # 도착 판정 ±2타일
-                    if abs(px-tx) <= 2 and abs(py-ty) <= 2: continue
+            self.running = False
+            self.status_var.set("완료")
+        except Exception as e:
+            print(f"[RUN ERROR] {e}", flush=True)
+            import traceback; traceback.print_exc()
+            self.running = False
+            self.status_var.set("에러")
 
-                    sx, sy = tile2scr(self.hwnd, px, py, tx, ty)
-                    self._do_click(sx, sy, mode)
+    def _run_astar_walk(self, tx, ty, mode="좌클릭"):
+        """A* 길찾기로 웨이포인트까지 이동"""
+        WALK_TIMEOUT = 60  # 최대 60초
+        start = time.monotonic()
+        while self.running:
+            if time.monotonic() - start > WALK_TIMEOUT:
+                print(f"[A*] 타임아웃 ({tx},{ty})", flush=True)
+                break
+            px, py = read_pos()
+            if px is None:
+                time.sleep(1); continue
+            dist = max(abs(tx - px), abs(ty - py))
+            if dist <= 2:
+                print(f"[A*] 도착 ({px},{py})", flush=True)
+                break
+            # A* 경로 탐색
+            try:
+                path, waypoints, elapsed = self.pf.find_path(px, py, tx, ty)
+            except Exception as e:
+                print(f"[A*] find_path 에러: {e}", flush=True)
+                path, waypoints = [], []
+            if not path or len(path) < 2:
+                print(f"[A*] 경로 없음 직선이동", flush=True)
+                self._run_direct_walk(tx, ty, mode)
+                return
+            # 웨이포인트 따라 걷기
+            for wi in range(1, len(waypoints)):
+                if not self.running: return
+                wx, wy = waypoints[wi]
+                # 화면 좌표로 변환 후 클릭
+                sx, sy = tile2scr(self.hwnd, px, py, wx, wy)
+                print(f"[A*] wp({wx},{wy}) → scr({sx},{sy})", flush=True)
+                self._do_click(sx, sy, mode)
+                # 이동 대기 — 플레이어 위치 갱신
+                for _ in range(30):
+                    if not self.running: return
+                    time.sleep(0.1)
+                    cx, cy = read_pos()
+                    if cx is not None and max(abs(cx - wx), abs(cy - wy)) <= 2:
+                        break
+                px, py = read_pos() if self.running else (px, py)
 
-                    if not self._sleep(random.uniform(dmin, dmax)): break
-
-            # 2) 대사 전송
-            for i in range(self.chat_lb.size()):
-                if not self.running: break
-                msg = self.chat_lb.get(i)
-                self._do_type(msg)
-                if not self._sleep(random.uniform(dmin, dmax)): break
-
-            if not inf: break
-
-        self.running = False
-        self.status_var.set("완료")
+    def _run_direct_walk(self, tx, ty, mode="좌클릭"):
+        """직선 스텝 이동 (PathFinder 없을 때 fallback)"""
+        MAX_STEP = 8
+        while self.running:
+            px, py = read_pos()
+            if px is None: time.sleep(1); continue
+            dx, dy = tx - px, ty - py
+            dist = max(abs(dx), abs(dy))
+            if dist <= 2:
+                print(f"[NAV] 도착 ({px},{py})", flush=True)
+                break
+            ratio = min(1.0, MAX_STEP / dist)
+            nx = px + int(dx * ratio)
+            ny = py + int(dy * ratio)
+            sx, sy = tile2scr(self.hwnd, px, py, nx, ny)
+            print(f"[NAV] ({px},{py}) → ({nx},{ny}) 목표=({tx},{ty}) scr({sx},{sy})", flush=True)
+            self._do_click(sx, sy, mode)
+            if not self._sleep(1.0): break
 
 
 # ═══════════════════════════════════════════
@@ -416,6 +620,8 @@ class ClientTab:
 class App:
     # F6 글로벌 핫키 — 현재 마우스 위치에 하드웨어 클릭
     HOTKEY_CLICK = 0xDD  # ] 키 (VK_OEM_6)
+    HOTKEY_START = 0x74  # F5
+    HOTKEY_STOP  = 0x1B  # Esc
 
     def __init__(self, root):
         self.root = root
@@ -438,14 +644,13 @@ class App:
         self.qvar = tk.StringVar(value="입력큐: 대기중")
         tk.Label(top, textvariable=self.qvar, bg=BG2, fg=TEAL,
                  font=("Consolas",9)).pack(side='left', padx=8)
-        self.hotkey_var = tk.StringVar(value="F6=클릭 ON")
+        self.hotkey_var = tk.StringVar(value="]=클릭 F5=시작 Esc=정지")
         tk.Label(top, textvariable=self.hotkey_var, bg=BG2, fg=PEACH,
                  font=("Consolas",9,"bold")).pack(side='right', padx=8)
         self._q_tick()
 
-        # 글로벌 핫키 등록
-        self._hotkey_id = 1
-        user32.RegisterHotKey(None, self._hotkey_id, 0, self.HOTKEY_CLICK)
+        # 글로벌 핫키 — GetAsyncKeyState 폴링
+        self._hotkey_active = False
         self._hotkey_thread = threading.Thread(target=self._hotkey_loop, daemon=True)
         self._hotkey_thread.start()
 
@@ -462,16 +667,37 @@ class App:
                   font=("맑은 고딕",9,"bold"), relief='flat', cursor='hand2').pack(side='left', padx=4)
 
     def _hotkey_loop(self):
-        """백그라운드 스레드 — F6 핫키 대기"""
-        import ctypes.wintypes as wt
-        MSG = ctypes.wintypes.MSG
-        msg = MSG()
-        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0):
-            if msg.message == 0x0312:  # WM_HOTKEY
-                hw.click()
+        """백그라운드 스레드 — 핫키 폴링"""
+        while True:
+            # ] = 하드웨어 클릭
+            state = user32.GetAsyncKeyState(self.HOTKEY_CLICK)
+            if state & 0x8000:
+                if not self._hotkey_active:
+                    self._hotkey_active = True
+                    cx, cy = ctypes.c_long(), ctypes.c_long()
+                    user32.GetCursorPos(ctypes.byref(cx), ctypes.byref(cy))
+                    print(f"[HOTKEY] ] 키 감지 → 클릭 @ ({cx.value},{cy.value}) drv={hw._drv is not None}")
+                    hw.click()
             else:
-                user32.TranslateMessage(ctypes.byref(msg))
-                user32.DispatchMessageW(ctypes.byref(msg))
+                self._hotkey_active = False
+
+            # F5 = 현재 탭 시작
+            if user32.GetAsyncKeyState(self.HOTKEY_START) & 0x8000:
+                tab = self._current_tab()
+                if tab and not tab.running:
+                    print(f"[HOTKEY] F5 → 클라{tab.slot} 시작", flush=True)
+                    tab._start()
+                    time.sleep(0.3)
+
+            # Esc = 현재 탭 정지
+            if user32.GetAsyncKeyState(self.HOTKEY_STOP) & 0x8000:
+                tab = self._current_tab()
+                if tab and tab.running:
+                    print(f"[HOTKEY] Esc → 클라{tab.slot} 정지", flush=True)
+                    tab._stop()
+                    time.sleep(0.3)
+
+            time.sleep(0.02)
 
     def _q_tick(self):
         qsize = sched._q.qsize()
@@ -490,6 +716,10 @@ class App:
             return
         for i, pid in enumerate(pids):
             self.tabs.append(ClientTab(self.nb, pid, i+1))
+
+    def _current_tab(self):
+        idx = self.nb.index(self.nb.select()) if self.nb.tabs() else -1
+        return self.tabs[idx] if 0 <= idx < len(self.tabs) else None
 
     def _stop_all(self):
         for t in self.tabs: t._stop()

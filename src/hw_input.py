@@ -115,7 +115,7 @@ class HWInput:
                 h = kernel32.CreateFileW(r'\\.\LcHide', 0xC0000000, 0, None, 3, 0, None)
             if h and h != INVALID_HANDLE:
                 self._drv = h
-                # 콜백 초기화
+                # 마우스 콜백 초기화
                 req = MOUSE_CLICK_REQUEST(ButtonFlags=0, DeltaX=0, DeltaY=0)
                 out = (ctypes.c_uint64 * 2)()
                 ret = ctypes.c_ulong(0)
@@ -131,6 +131,18 @@ class HWInput:
                 else:
                     print("[!] 드라이버 마우스 콜백 실패 → SendInput fallback")
                     self._drv = None
+                # 키보드 콜백 초기화
+                if self._drv:
+                    kreq = KBD_INPUT_REQUEST(MakeCode=0, Flags=0)
+                    kout = (ctypes.c_uint64 * 2)()
+                    kret = ctypes.c_ulong(0)
+                    ok = kernel32.DeviceIoControl(self._drv, IOCTL_KBD_INPUT,
+                        ctypes.byref(kreq), ctypes.sizeof(kreq),
+                        ctypes.byref(kout), 16, ctypes.byref(kret), None)
+                    if ok:
+                        print(f"[OK] 드라이버 키보드 (cb=0x{kout[0]:X} dev=0x{kout[1]:X})")
+                    else:
+                        print(f"[!] 드라이버 키보드 초기화 실패 → SendInput fallback")
             else:
                 print("[!] 드라이버 없음 → mouse_event fallback")
         except:
@@ -141,16 +153,21 @@ class HWInput:
         if self._drv:
             req = KBD_INPUT_REQUEST(MakeCode=scancode, Flags=1 if up else 0)
             ret = ctypes.c_ulong(0)
-            ok = kernel32.DeviceIoControl(self._drv, IOCTL_KBD_INPUT,
-                ctypes.byref(req), ctypes.sizeof(req), None, 0, ctypes.byref(ret), None)
-            if ok:
-                return
-            # 드라이버 실패 → keybd_event fallback
-        # fallback: MapVirtualKey로 VK 찾아서 keybd_event
-        vk = user32.MapVirtualKeyW(scancode, 1)  # MAPVK_VSC_TO_VK
-        if vk:
-            flags = KEYEVENTF_KEYUP if up else 0
-            user32.keybd_event(vk, scancode, flags, 0)
+            try:
+                ok = kernel32.DeviceIoControl(self._drv, IOCTL_KBD_INPUT,
+                    ctypes.byref(req), ctypes.sizeof(req), None, 0, ctypes.byref(ret), None)
+                if ok:
+                    return
+                # 드라이버 실패 → SendInput 스캔코드 fallback
+            except Exception as e:
+                print(f"[KBD] 드라이버 예외: {e}")
+        # SendInput 스캔코드 (DirectInput 대응)
+        KEYEVENTF_SCANCODE = 0x0008
+        inp = INPUT()
+        inp.type = 1  # INPUT_KEYBOARD
+        inp.ki.wScan = scancode
+        inp.ki.dwFlags = KEYEVENTF_SCANCODE | (KEYEVENTF_KEYUP if up else 0)
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
     def _drv_mouse(self, flags, dx=0, dy=0):
         """드라이버를 통한 하드웨어 마우스 입력"""
@@ -210,12 +227,13 @@ class HWInput:
             time.sleep(0.03)
 
     def type_text(self, text):
-        """숫자/텍스트/한글 타이핑 — UNICODE 플래그로 모든 문자 지원"""
+        """텍스트 타이핑 — 드라이버 키보드 우선, UNICODE는 SendInput"""
         KEYEVENTF_UNICODE = 0x0004
+        KEYEVENTF_SCANCODE = 0x0008
         for ch in str(text):
             cp = ord(ch)
             if cp < 128:
-                # ASCII: 기존 방식 (드라이버 우선)
+                # ASCII: 드라이버 스캔코드
                 vk = ord(ch.upper())
                 scan = user32.MapVirtualKeyW(vk, 0)
                 if scan:
@@ -223,21 +241,23 @@ class HWInput:
                     time.sleep(0.03)
                     self._drv_kbd(scan, up=True)
                 else:
-                    user32.keybd_event(vk, 0, 0, 0)
+                    inp = INPUT(); inp.type = 1; inp.ki.wVk = vk
+                    user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
                     time.sleep(0.03)
-                    user32.keybd_event(vk, 0, KEYEVENTF_KEYUP, 0)
+                    inp2 = INPUT(); inp2.type = 1; inp2.ki.wVk = vk; inp2.ki.dwFlags = KEYEVENTF_KEYUP
+                    user32.SendInput(1, ctypes.byref(inp2), ctypes.sizeof(inp2))
             else:
-                # 한글/유니코드: SendInput KEYEVENTF_UNICODE
+                # 한글/유니코드: SendInput UNICODE
                 inp_down = INPUT()
-                inp_down.type = 1  # INPUT_KEYBOARD
+                inp_down.type = 1
                 inp_down.ki.wScan = cp
-                inp_down.ki.dwFlags = 0x0004  # KEYEVENTF_UNICODE
+                inp_down.ki.dwFlags = KEYEVENTF_UNICODE
                 user32.SendInput(1, ctypes.byref(inp_down), ctypes.sizeof(inp_down))
                 time.sleep(0.03)
                 inp_up = INPUT()
                 inp_up.type = 1
                 inp_up.ki.wScan = cp
-                inp_up.ki.dwFlags = 0x0004 | 0x0002  # KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+                inp_up.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
                 user32.SendInput(1, ctypes.byref(inp_up), ctypes.sizeof(inp_up))
             time.sleep(random.uniform(0.02, 0.06))
 
@@ -254,6 +274,26 @@ class HWInput:
         time.sleep(0.03)
         scan = VK_TO_SCAN.get(VK_CONTROL, 0x1D)
         self._drv_kbd(scan, up=True)
+
+    def _ctrl_v(self):
+        """Ctrl+V — SendInput으로 안정적 처리"""
+        VK_CTRL = 0x11; VK_V = 0x56
+        # Ctrl down
+        inp = INPUT(); inp.type = 1; inp.ki.wVk = VK_CTRL
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+        time.sleep(0.03)
+        # V down
+        inp = INPUT(); inp.type = 1; inp.ki.wVk = VK_V
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+        time.sleep(0.03)
+        # V up
+        inp = INPUT(); inp.type = 1; inp.ki.wVk = VK_V; inp.ki.dwFlags = KEYEVENTF_KEYUP
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+        time.sleep(0.02)
+        # Ctrl up
+        inp = INPUT(); inp.type = 1; inp.ki.wVk = VK_CTRL; inp.ki.dwFlags = KEYEVENTF_KEYUP
+        user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
+        time.sleep(0.05)
 
     def key(self, vk):
         """키 누르기 (드라이버 우선)"""
