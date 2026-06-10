@@ -160,17 +160,42 @@ def find_hwnd(pid):
     user32.EnumWindows(WNDENUMPROC(cb),0)
     return r[0]
 
-def read_pos():
-    """scan_read_loc: 프로세스 메모리에서 'location (' 문자열 스캔"""
+_last_loc = [None, None, 0]  # [x, y, timestamp]
+
+def send_loc():
+    """드라이버 키보드로 /loc 자동 입력"""
+    hw.key(0x0D); time.sleep(0.3)
+    hw.type_text("/loc"); time.sleep(0.1)
+    hw.key(0x0D); time.sleep(1.5)
+    print("[LOC] /loc 전송완료", flush=True)
+
+def read_pos(auto_loc=True):
+    """좌표 읽기 — scan_read_loc 우선, 실패시 /loc 입력 후 재시도"""
     x,y=ctypes.c_int(),ctypes.c_int()
     if hasattr(_scan, 'scan_read_loc'):
         r = _scan.scan_read_loc(ctypes.byref(x),ctypes.byref(y))
         if r:
+            _last_loc[0], _last_loc[1], _last_loc[2] = x.value, y.value, time.time()
             return x.value, y.value
     # fallback: scan_read_player
     r = _scan.scan_read_player(ctypes.byref(x),ctypes.byref(y))
     if r:
+        _last_loc[0], _last_loc[1], _last_loc[2] = x.value, y.value, time.time()
         return x.value, y.value
+    # 둘 다 실패 → /loc 입력 후 재시도
+    if auto_loc:
+        try:
+            send_loc()
+            if hasattr(_scan, 'scan_read_loc'):
+                r = _scan.scan_read_loc(ctypes.byref(x),ctypes.byref(y))
+                if r:
+                    _last_loc[0], _last_loc[1], _last_loc[2] = x.value, y.value, time.time()
+                    return x.value, y.value
+        except Exception as e:
+            print(f"[LOC] 자동 /loc 실패: {e}", flush=True)
+    # 최후: 마지막 성공 좌표 (5초 이내)
+    if _last_loc[0] is not None and time.time() - _last_loc[2] < 5.0:
+        return _last_loc[0], _last_loc[1]
     return None, None
 
 def tile2scr(hwnd, px,py, tx,ty):
@@ -391,8 +416,28 @@ class ClientTab:
         sched.submit(self.cid, action)
 
     # ── UI 액션 ──
+    def _send_loc(self):
+        """드라이버 키보드로 /loc 입력 — 채팅창에 좌표 출력 유도"""
+        def action():
+            # Enter (채팅창 열기)
+            hw.key(0x0D)
+            time.sleep(0.3)
+            # /loc 타이핑 (ASCII)
+            hw.type_text("/loc")
+            time.sleep(0.1)
+            # Enter (전송)
+            hw.key(0x0D)
+            print("[LOC] /loc 전송완료")
+        sched.submit(self.cid, action)
+        time.sleep(1.5)  # 채팅창에 결과 나올 때까지 대기
+
     def _get_pos(self):
+        """좌표 읽기 — scan_read_loc 우선, 실패시 scan_read_player"""
         x, y = read_pos()
+        if x is None:
+            # 좌표 읽기 실패 → /loc 입력 후 재시도
+            self._send_loc()
+            x, y = read_pos()
         self.pos_var.set(f"좌표: ({x},{y})" if x is not None else "좌표: 읽기실패")
 
     def _add_wp(self):
