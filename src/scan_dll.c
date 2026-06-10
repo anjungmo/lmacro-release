@@ -855,13 +855,13 @@ __declspec(dllexport) int __cdecl scan_read_loc(int *outX, int *outY) {
     HANDLE h = OpenProcess(PROCESS_ALL_ACCESS, FALSE, s_pid);
     if (!h) return 0;
 
-    /* Scan writable memory regions for "location (" */
+    /* UTF-16LE patterns: "location (" and "location [" */
+    WCHAR pat1[] = L"location (";
+    WCHAR pat2[] = L"location [";
+    int patWcs = 10; /* wcslen */
     MEMORY_BASIC_INFORMATION mbi;
     __int64 addr = 0;
     int found = 0;
-    char pattern1[] = "location (";
-    char pattern2[] = "location [";
-    int patLen = 10;
     int lastX = 0, lastY = 0;
 
     while (VirtualQueryEx(h, (LPCVOID)addr, &mbi, sizeof(mbi))) {
@@ -870,28 +870,26 @@ __declspec(dllexport) int __cdecl scan_read_loc(int *outX, int *outY) {
             !(mbi.Protect & PAGE_GUARD)) {
 
             SIZE_T regionSize = mbi.RegionSize;
-            char *buf = (char*)VirtualAlloc(NULL, regionSize, MEM_COMMIT, PAGE_READWRITE);
-            if (buf) {
+            char *raw = (char*)VirtualAlloc(NULL, regionSize, MEM_COMMIT, PAGE_READWRITE);
+            if (raw) {
                 SIZE_T bytesRead = 0;
-                if (ReadProcessMemory(h, mbi.BaseAddress, buf, regionSize, &bytesRead) && bytesRead > patLen) {
-                    /* Search backwards — we want the LAST occurrence (most recent) */
-                    for (SIZE_T i = bytesRead - patLen - 40; i > 0 && i < bytesRead; i--) {
-                        if (memcmp(buf + i, pattern1, patLen) == 0 || memcmp(buf + i, pattern2, patLen) == 0) {
-                            /* Parse: location (XXXXX, YYYYY) */
-                            char *p = buf + i + patLen;
+                if (ReadProcessMemory(h, mbi.BaseAddress, raw, regionSize, &bytesRead) && bytesRead > patWcs * 2) {
+                    WCHAR *wbuf = (WCHAR*)raw;
+                    SIZE_T wlen = bytesRead / 2;
+                    /* Search backwards for LAST match */
+                    for (SIZE_T i = wlen - patWcs - 20; i > 0 && i < wlen; i--) {
+                        if (memcmp(wbuf + i, pat1, patWcs * 2) == 0 ||
+                            memcmp(wbuf + i, pat2, patWcs * 2) == 0) {
+                            WCHAR *p = wbuf + i + patWcs;
                             int vx = 0, vy = 0, sign = 1;
-                            /* skip spaces */
-                            while (*p == ' ') p++;
-                            /* parse X */
-                            if (*p == '-') { sign = -1; p++; }
-                            while (*p >= '0' && *p <= '9') { vx = vx * 10 + (*p - '0'); p++; }
+                            while (*p == L' ') p++;
+                            if (*p == L'-') { sign = -1; p++; }
+                            while (*p >= L'0' && *p <= L'9') { vx = vx * 10 + (*p - L'0'); p++; }
                             vx *= sign;
-                            /* skip comma, spaces */
-                            while (*p == ',' || *p == ' ' || *p == '\t') p++;
-                            /* parse Y */
+                            while (*p == L',' || *p == L' ' || *p == L'\t') p++;
                             sign = 1;
-                            if (*p == '-') { sign = -1; p++; }
-                            while (*p >= '0' && *p <= '9') { vy = vy * 10 + (*p - '0'); p++; }
+                            if (*p == L'-') { sign = -1; p++; }
+                            while (*p >= L'0' && *p <= L'9') { vy = vy * 10 + (*p - L'0'); p++; }
                             vy *= sign;
                             if (vx > 1000 && vy > 1000) {
                                 lastX = vx; lastY = vy; found = 1;
@@ -899,11 +897,11 @@ __declspec(dllexport) int __cdecl scan_read_loc(int *outX, int *outY) {
                         }
                     }
                 }
-                VirtualFree(buf, 0, MEM_RELEASE);
+                VirtualFree(raw, 0, MEM_RELEASE);
             }
         }
         addr = (__int64)mbi.BaseAddress + mbi.RegionSize;
-        if (addr < (__int64)mbi.BaseAddress) break; /* overflow */
+        if (addr < (__int64)mbi.BaseAddress) break;
     }
     CloseHandle(h);
     if (found) { *outX = lastX; *outY = lastY; }

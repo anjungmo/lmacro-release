@@ -160,42 +160,44 @@ def find_hwnd(pid):
     user32.EnumWindows(WNDENUMPROC(cb),0)
     return r[0]
 
-_last_loc = [None, None, 0]  # [x, y, timestamp]
+_loc_cache = {'x': None, 'y': None, 't': 0, 'loc_sent': 0}
+_LOC_TTL = 3.0       # 캐시 유효시간(초)
+_LOC_INTERVAL = 5.0  # /loc 재전송 최소 간격
 
-def send_loc():
-    """드라이버 키보드로 /loc 자동 입력"""
-    hw.key(0x0D); time.sleep(0.3)
-    hw.type_text("/loc"); time.sleep(0.1)
-    hw.key(0x0D); time.sleep(1.5)
-    print("[LOC] /loc 전송완료", flush=True)
+def _send_loc_async():
+    """백그라운드에서 /loc 입력 (논블로킹)"""
+    now = time.time()
+    if now - _loc_cache['loc_sent'] < _LOC_INTERVAL:
+        return  # 너무 자주 치지 않음
+    _loc_cache['loc_sent'] = now
+    import threading
+    def _do():
+        hw.key(0x0D); time.sleep(0.2)
+        hw.type_text("/loc"); time.sleep(0.08)
+        hw.key(0x0D)
+    threading.Thread(target=_do, daemon=True).start()
 
-def read_pos(auto_loc=True):
-    """좌표 읽기 — scan_read_loc 우선, 실패시 /loc 입력 후 재시도"""
+def read_pos():
+    """좌표 읽기 — 캐시 우선, 만료시 메모리 스캔 → /loc 입력"""
+    now = time.time()
+    # 캐시 유효하면 즉시 반환
+    if _loc_cache['x'] is not None and now - _loc_cache['t'] < _LOC_TTL:
+        return _loc_cache['x'], _loc_cache['y']
+    # 메모리에서 바로 읽기 시도 (빠름)
     x,y=ctypes.c_int(),ctypes.c_int()
     if hasattr(_scan, 'scan_read_loc'):
         r = _scan.scan_read_loc(ctypes.byref(x),ctypes.byref(y))
         if r:
-            _last_loc[0], _last_loc[1], _last_loc[2] = x.value, y.value, time.time()
+            _loc_cache.update(x=x.value, y=y.value, t=now)
             return x.value, y.value
-    # fallback: scan_read_player
     r = _scan.scan_read_player(ctypes.byref(x),ctypes.byref(y))
     if r:
-        _last_loc[0], _last_loc[1], _last_loc[2] = x.value, y.value, time.time()
+        _loc_cache.update(x=x.value, y=y.value, t=now)
         return x.value, y.value
-    # 둘 다 실패 → /loc 입력 후 재시도
-    if auto_loc:
-        try:
-            send_loc()
-            if hasattr(_scan, 'scan_read_loc'):
-                r = _scan.scan_read_loc(ctypes.byref(x),ctypes.byref(y))
-                if r:
-                    _last_loc[0], _last_loc[1], _last_loc[2] = x.value, y.value, time.time()
-                    return x.value, y.value
-        except Exception as e:
-            print(f"[LOC] 자동 /loc 실패: {e}", flush=True)
-    # 최후: 마지막 성공 좌표 (5초 이내)
-    if _last_loc[0] is not None and time.time() - _last_loc[2] < 5.0:
-        return _last_loc[0], _last_loc[1]
+    # 실패 → /loc 비동기 전송 후 캐시 반환
+    _send_loc_async()
+    if _loc_cache['x'] is not None:
+        return _loc_cache['x'], _loc_cache['y']
     return None, None
 
 def tile2scr(hwnd, px,py, tx,ty):
@@ -416,28 +418,8 @@ class ClientTab:
         sched.submit(self.cid, action)
 
     # ── UI 액션 ──
-    def _send_loc(self):
-        """드라이버 키보드로 /loc 입력 — 채팅창에 좌표 출력 유도"""
-        def action():
-            # Enter (채팅창 열기)
-            hw.key(0x0D)
-            time.sleep(0.3)
-            # /loc 타이핑 (ASCII)
-            hw.type_text("/loc")
-            time.sleep(0.1)
-            # Enter (전송)
-            hw.key(0x0D)
-            print("[LOC] /loc 전송완료")
-        sched.submit(self.cid, action)
-        time.sleep(1.5)  # 채팅창에 결과 나올 때까지 대기
-
     def _get_pos(self):
-        """좌표 읽기 — scan_read_loc 우선, 실패시 scan_read_player"""
         x, y = read_pos()
-        if x is None:
-            # 좌표 읽기 실패 → /loc 입력 후 재시도
-            self._send_loc()
-            x, y = read_pos()
         self.pos_var.set(f"좌표: ({x},{y})" if x is not None else "좌표: 읽기실패")
 
     def _add_wp(self):
