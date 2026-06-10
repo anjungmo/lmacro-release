@@ -160,45 +160,63 @@ def find_hwnd(pid):
     user32.EnumWindows(WNDENUMPROC(cb),0)
     return r[0]
 
-_loc_cache = {'x': None, 'y': None, 't': 0, 'loc_sent': 0}
-_LOC_TTL = 3.0       # 캐시 유효시간(초)
-_LOC_INTERVAL = 5.0  # /loc 재전송 최소 간격
+_loc_cache = {'x': None, 'y': None, 't': 0}
+_LOC_TTL = 2.0
 
-def _send_loc_async():
-    """백그라운드에서 /loc 입력 (논블로킹)"""
-    now = time.time()
-    if now - _loc_cache['loc_sent'] < _LOC_INTERVAL:
-        return  # 너무 자주 치지 않음
-    _loc_cache['loc_sent'] = now
-    import threading
-    def _do():
-        hw.key(0x0D); time.sleep(0.2)
-        hw.type_text("/loc"); time.sleep(0.08)
-        hw.key(0x0D)
-    threading.Thread(target=_do, daemon=True).start()
+def _drv_type_loc():
+    """PostMessage WM_CHAR로 '/loc' 직접 전송 — IME 무시"""
+    pids = find_pids()
+    hwnd = find_hwnd(pids[0]) if pids else None
+    if not hwnd:
+        return
+    user32.SetForegroundWindow(hwnd)
+    time.sleep(0.3)
+    # Enter (채팅창 열기) — 드라이버
+    hw.key(0x0D)
+    time.sleep(0.3)
+    # WM_CHAR로 글자 직접 전송 (IME 우회)
+    WM_CHAR = 0x0102
+    for ch in '/loc':
+        user32.PostMessageW(hwnd, WM_CHAR, ord(ch), 0)
+        time.sleep(0.05)
+    time.sleep(0.1)
+    # Enter (전송) — 드라이버
+    hw.key(0x0D)
 
 def read_pos():
-    """좌표 읽기 — 캐시 우선, 만료시 메모리 스캔 → /loc 입력"""
+    """RVA 기반 메모리에서 직접 좌표 읽기 (scan_read_coords)"""
     now = time.time()
-    # 캐시 유효하면 즉시 반환
     if _loc_cache['x'] is not None and now - _loc_cache['t'] < _LOC_TTL:
         return _loc_cache['x'], _loc_cache['y']
-    # 메모리에서 바로 읽기 시도 (빠름)
-    x,y=ctypes.c_int(),ctypes.c_int()
-    if hasattr(_scan, 'scan_read_loc'):
-        r = _scan.scan_read_loc(ctypes.byref(x),ctypes.byref(y))
-        if r:
-            _loc_cache.update(x=x.value, y=y.value, t=now)
+    x,y = ctypes.c_int(), ctypes.c_int()
+    if hasattr(_scan, 'scan_read_coords'):
+        r = _scan.scan_read_coords(ctypes.byref(x), ctypes.byref(y))
+        if r and x.value > 1000 and y.value > 1000:
+            _loc_cache.update(x=x.value, y=y.value, t=time.time())
+            print(f"[POS] {x.value}, {y.value}", flush=True)
             return x.value, y.value
-    r = _scan.scan_read_player(ctypes.byref(x),ctypes.byref(y))
-    if r:
-        _loc_cache.update(x=x.value, y=y.value, t=now)
-        return x.value, y.value
-    # 실패 → /loc 비동기 전송 후 캐시 반환
-    _send_loc_async()
+    print("[POS] 읽기 실패", flush=True)
     if _loc_cache['x'] is not None:
         return _loc_cache['x'], _loc_cache['y']
     return None, None
+
+def chat_send(text):
+    """WM_CHAR로 채팅 전송 — 한영 자동 구분"""
+    pids = find_pids()
+    hwnd = find_hwnd(pids[0]) if pids else None
+    if not hwnd:
+        print("[CHAT] 창 없음"); return
+    user32.SetForegroundWindow(hwnd)
+    time.sleep(0.3)
+    hw.key(0x0D)  # Enter (채팅창 열기)
+    time.sleep(0.3)
+    WM_CHAR = 0x0102
+    for ch in text:
+        user32.PostMessageW(hwnd, WM_CHAR, ord(ch), 0)
+        time.sleep(0.05)
+    time.sleep(0.1)
+    hw.key(0x0D)  # Enter (전송)
+    print(f"[CHAT] 전송: {text}", flush=True)
 
 def tile2scr(hwnd, px,py, tx,ty):
     cr=wt.RECT(); user32.GetClientRect(hwnd,ctypes.byref(cr))

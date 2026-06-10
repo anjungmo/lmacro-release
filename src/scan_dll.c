@@ -428,11 +428,30 @@ __declspec(dllexport) int __cdecl scan_read_player(int *outX, int *outY) {
 }
 
 /* Debug: return exe base for diagnosis */
-__declspec(dllexport) int __cdecl scan_get_exe_base(void) {
+__declspec(dllexport) __int64 __cdecl scan_get_exe_base64(void) {
     if (!hProc) return 0;
     HMODULE exeMod = 0; DWORD cb = 0;
     EnumProcessModulesEx(hProc, &exeMod, sizeof(exeMod), &cb, LIST_MODULES_ALL);
-    return (int)(__int64)exeMod;
+    return (__int64)exeMod;
+}
+
+/* RVA-based coordinate read — works across restarts */
+#define COORD_RVA 0x14B54F0
+
+__declspec(dllexport) int __cdecl scan_read_coords(int *outX, int *outY) {
+    HANDLE h = OpenProcess(PROCESS_ALL_ACCESS, FALSE, s_pid);
+    if (!h) return 0;
+    HMODULE exeMod = 0; DWORD cb = 0;
+    EnumProcessModulesEx(h, &exeMod, sizeof(exeMod), &cb, LIST_MODULES_ALL);
+    if (!exeMod) { CloseHandle(h); return 0; }
+    __int64 addr = (__int64)exeMod + COORD_RVA;
+    int c[2]; SIZE_T rd2;
+    int ok = ReadProcessMemory(h, (void*)addr, c, 8, &rd2);
+    CloseHandle(h);
+    if (!ok || c[0] < 10000 || c[0] > 60000 || c[1] < 10000 || c[1] > 60000) return 0;
+    *outX = c[0]; *outY = c[1];
+    bgPx = c[0]; bgPy = c[1];
+    return 1;
 }
 
 __declspec(dllexport) int __cdecl scan_read_hp(int *chp, int *mhp, int *cmp, int *mmp) {
