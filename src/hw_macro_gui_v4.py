@@ -414,6 +414,9 @@ class ClientTab:
 #  메인 앱
 # ═══════════════════════════════════════════
 class App:
+    # F6 글로벌 핫키 — 현재 마우스 위치에 하드웨어 클릭
+    HOTKEY_CLICK = 0xDD  # ] 키 (VK_OEM_6)
+
     def __init__(self, root):
         self.root = root
         root.title("리니지 하드웨어 매크로 v4 — 동시성 큐")
@@ -429,13 +432,22 @@ class App:
               foreground=[('selected','black')])
         s.configure('TCombobox', fieldbackground=BG3, background=BG3, foreground=FG)
 
-        # 상단 큐 상태
+        # 상단 큐 상태 + 핫키 표시
         top = tk.Frame(root, bg=BG2, height=28)
         top.pack(fill='x', padx=4, pady=(4,0))
         self.qvar = tk.StringVar(value="입력큐: 대기중")
         tk.Label(top, textvariable=self.qvar, bg=BG2, fg=TEAL,
                  font=("Consolas",9)).pack(side='left', padx=8)
+        self.hotkey_var = tk.StringVar(value="F6=클릭 ON")
+        tk.Label(top, textvariable=self.hotkey_var, bg=BG2, fg=PEACH,
+                 font=("Consolas",9,"bold")).pack(side='right', padx=8)
         self._q_tick()
+
+        # 글로벌 핫키 등록
+        self._hotkey_id = 1
+        user32.RegisterHotKey(None, self._hotkey_id, 0, self.HOTKEY_CLICK)
+        self._hotkey_thread = threading.Thread(target=self._hotkey_loop, daemon=True)
+        self._hotkey_thread.start()
 
         self.nb = ttk.Notebook(root)
         self.nb.pack(fill='both', expand=True, padx=4, pady=4)
@@ -448,6 +460,18 @@ class App:
                   font=("맑은 고딕",9,"bold"), relief='flat', cursor='hand2').pack(side='left', padx=4)
         tk.Button(bf, text="■ 전체정지", command=self._stop_all, bg=RED, fg="black",
                   font=("맑은 고딕",9,"bold"), relief='flat', cursor='hand2').pack(side='left', padx=4)
+
+    def _hotkey_loop(self):
+        """백그라운드 스레드 — F6 핫키 대기"""
+        import ctypes.wintypes as wt
+        MSG = ctypes.wintypes.MSG
+        msg = MSG()
+        while user32.GetMessageW(ctypes.byref(msg), None, 0, 0):
+            if msg.message == 0x0312:  # WM_HOTKEY
+                hw.click()
+            else:
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
 
     def _q_tick(self):
         qsize = sched._q.qsize()
