@@ -845,6 +845,71 @@ __declspec(dllexport) int __cdecl map_find_path(int sx, int sy, int dx, int dy,
     return 0; /* truly no path */
 }
 
+/*
+ * scan_read_loc — scan process memory for "location (" string, parse x,y coords
+ * Returns 1 on success, 0 on failure. Scans from last known position.
+ * Pattern: "location (" or "location[" followed by numbers
+ */
+__declspec(dllexport) int __cdecl scan_read_loc(int *outX, int *outY) {
+    if (!s_pid) return 0;
+    HANDLE h = OpenProcess(PROCESS_ALL_ACCESS, FALSE, s_pid);
+    if (!h) return 0;
+
+    /* Scan writable memory regions for "location (" */
+    MEMORY_BASIC_INFORMATION mbi;
+    __int64 addr = 0;
+    int found = 0;
+    char pattern1[] = "location (";
+    char pattern2[] = "location [";
+    int patLen = 10;
+    int lastX = 0, lastY = 0;
+
+    while (VirtualQueryEx(h, (LPCVOID)addr, &mbi, sizeof(mbi))) {
+        if (mbi.State == MEM_COMMIT &&
+            (mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) &&
+            !(mbi.Protect & PAGE_GUARD)) {
+
+            SIZE_T regionSize = mbi.RegionSize;
+            char *buf = (char*)VirtualAlloc(NULL, regionSize, MEM_COMMIT, PAGE_READWRITE);
+            if (buf) {
+                SIZE_T bytesRead = 0;
+                if (ReadProcessMemory(h, mbi.BaseAddress, buf, regionSize, &bytesRead) && bytesRead > patLen) {
+                    /* Search backwards — we want the LAST occurrence (most recent) */
+                    for (SIZE_T i = bytesRead - patLen - 40; i > 0 && i < bytesRead; i--) {
+                        if (memcmp(buf + i, pattern1, patLen) == 0 || memcmp(buf + i, pattern2, patLen) == 0) {
+                            /* Parse: location (XXXXX, YYYYY) */
+                            char *p = buf + i + patLen;
+                            int vx = 0, vy = 0, sign = 1;
+                            /* skip spaces */
+                            while (*p == ' ') p++;
+                            /* parse X */
+                            if (*p == '-') { sign = -1; p++; }
+                            while (*p >= '0' && *p <= '9') { vx = vx * 10 + (*p - '0'); p++; }
+                            vx *= sign;
+                            /* skip comma, spaces */
+                            while (*p == ',' || *p == ' ' || *p == '\t') p++;
+                            /* parse Y */
+                            sign = 1;
+                            if (*p == '-') { sign = -1; p++; }
+                            while (*p >= '0' && *p <= '9') { vy = vy * 10 + (*p - '0'); p++; }
+                            vy *= sign;
+                            if (vx > 1000 && vy > 1000) {
+                                lastX = vx; lastY = vy; found = 1;
+                            }
+                        }
+                    }
+                }
+                VirtualFree(buf, 0, MEM_RELEASE);
+            }
+        }
+        addr = (__int64)mbi.BaseAddress + mbi.RegionSize;
+        if (addr < (__int64)mbi.BaseAddress) break; /* overflow */
+    }
+    CloseHandle(h);
+    if (found) { *outX = lastX; *outY = lastY; }
+    return found;
+}
+
 BOOL WINAPI DllMain(HINSTANCE h, DWORD reason, LPVOID r) {
     (void)h; (void)reason; (void)r; return TRUE;
 }

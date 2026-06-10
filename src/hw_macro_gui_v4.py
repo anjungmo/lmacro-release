@@ -42,6 +42,12 @@ _scan.scan_init.restype = ctypes.c_int
 _scan.scan_init.argtypes = [ctypes.c_int, ctypes.c_int]
 _scan.scan_read_player.restype = ctypes.c_int
 _scan.scan_read_player.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+try:
+    _scan.scan_read_loc.restype = ctypes.c_int
+    _scan.scan_read_loc.argtypes = [ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int)]
+    print("[OK] scan_read_loc 바인딩")
+except Exception as _e:
+    print(f"[WARN] scan_read_loc 없음: {_e}")
 print("[INFO] scan_init 호출...")
 _init_result = _scan.scan_init(0, 0)
 print(f"[INFO] scan_init 결과: {_init_result}")
@@ -155,7 +161,13 @@ def find_hwnd(pid):
     return r[0]
 
 def read_pos():
+    """scan_read_loc: 프로세스 메모리에서 'location (' 문자열 스캔"""
     x,y=ctypes.c_int(),ctypes.c_int()
+    if hasattr(_scan, 'scan_read_loc'):
+        r = _scan.scan_read_loc(ctypes.byref(x),ctypes.byref(y))
+        if r:
+            return x.value, y.value
+    # fallback: scan_read_player
     r = _scan.scan_read_player(ctypes.byref(x),ctypes.byref(y))
     if r:
         return x.value, y.value
