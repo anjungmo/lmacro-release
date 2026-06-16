@@ -1,0 +1,7 @@
+# HTTP 프록시 예시
+# http://user:pass@host:port
+# http://host:port
+
+# SOCKS5 프록시 예시
+# socks5://user:pass@host:port
+# socks5://host:port
