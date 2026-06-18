@@ -369,22 +369,35 @@ class MacroEngine:
             self.is_running = False
     
     async def _attempt_booking(self):
-        """예매 시도"""
+        """예매 시도 - 10회 재시도"""
+        max_retries = 10
+        
         for account in self.accounts:
-            try:
-                logger.info(f"[{account.username}] 예매 시도")
-                
-                # TODO: 실제 예매 API 호출
-                # 캡처된 API를 사용해서:
-                # 1. 회차 조회
-                # 2. 좌석 조회
-                # 3. 좌석 선택
-                # 4. 결제
-                
-                await asyncio.sleep(0.5)
-                
-            except Exception as e:
-                logger.error(f"[{account.username}] 오류: {e}")
+            for attempt in range(max_retries):
+                try:
+                    logger.info(f"[{account.username}] 예매 시도 {attempt + 1}/{max_retries}")
+                    
+                    # TODO: 실제 예매 API 호출
+                    # 캡처된 API를 사용해서:
+                    # 1. 회차 조회
+                    # 2. 좌석 조회
+                    # 3. 좌석 선택 (208 → 207 → 209 → 206 → 210)
+                    # 4. 결제
+                    
+                    # 성공 시 종료
+                    # return True
+                    
+                    await asyncio.sleep(0.5)
+                    
+                except Exception as e:
+                    logger.error(f"[{account.username}] 오류 (시도 {attempt + 1}): {e}")
+                    
+                    if attempt < max_retries - 1:
+                        wait_time = 0.3 * (attempt + 1)
+                        logger.info(f"[{account.username}] {wait_time}초 후 재시도...")
+                        await asyncio.sleep(wait_time)
+                    else:
+                        logger.error(f"[{account.username}] 10회 모두 실패")
     
     def stop(self):
         self.is_running = False

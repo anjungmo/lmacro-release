@@ -378,7 +378,7 @@ class InterparkMacro:
     
     async def run_booking_session(self, account: AccountConfig):
         """단일 세션 실행"""
-        max_retries = 3
+        max_retries = 10
         
         for attempt in range(max_retries):
             if not self.is_running:
