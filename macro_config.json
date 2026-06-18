@@ -1,0 +1,18 @@
+{
+  "accounts": [
+    {
+      "username": "happygift07@naver.com",
+      "password": "pluto2026@@"
+    }
+  ],
+  "goods_code": "26007886",
+  "open_time": "2026-06-18T20:00:00+09:00",
+  "seat_preference": {
+    "min_price": 0,
+    "max_price": 200000,
+    "preferred_sections": [],
+    "preferred_floors": ["1층", "2층"],
+    "max_seats": 2,
+    "priority": "price"
+  }
+}
