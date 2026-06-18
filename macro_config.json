@@ -12,7 +12,7 @@
     "max_price": 999999999,
     "preferred_sections": [],
     "preferred_floors": ["1층", "2층"],
-    "max_seats": 2,
+    "max_seats": 1,
     "priority": "price"
   }
 }
