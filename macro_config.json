@@ -10,7 +10,7 @@
   "seat_preference": {
     "min_price": 0,
     "max_price": 999999999,
-    "preferred_sections": ["208"],
+    "preferred_sections": ["208", "213", "212", "203", "204"],
     "preferred_floors": ["2층"],
     "max_seats": 1,
     "priority": "price"
